@@ -279,10 +279,8 @@ class ScraperGUI:
                 self.log("📋 取得済みスキップモード: OFF（すべて取得）")
             self.log("=" * 60)
             
-            # 一覧ページから物件URLを取得
-            self.log("📄 一覧ページを取得中...")
-            list_soup = self.fetch_list_page()
-            detail_urls = self.get_detail_urls(list_soup, max_items)
+            # 一覧ページから物件URLを取得（複数ページ対応）
+            detail_urls = self.get_detail_urls(max_items)
             
             if not detail_urls:
                 self.log("❌ エラー: 物件URLが取得できませんでした")
@@ -300,16 +298,6 @@ class ScraperGUI:
                     self.log("⚠️ ユーザーによって停止されました")
                     break
                 
-                # 物件番号を抽出（URLから）
-                estate_id = url.rstrip('/').split('/')[-1]
-                
-                # スキップチェック
-                if skip_scraped and estate_id in self.scraped_ids:
-                    self.log(f"[{idx}/{len(detail_urls)}] ⏭️ スキップ: 物件番号 {estate_id}（取得済み）")
-                    skipped_count += 1
-                    self.update_progress(idx, len(detail_urls))
-                    continue
-                
                 self.log(f"[{idx}/{len(detail_urls)}] 処理中: {url}")
                 self.update_progress(idx - 1, len(detail_urls))
                 
@@ -320,18 +308,26 @@ class ScraperGUI:
                     # 物件情報を抽出
                     d = self.extract_detail(soup, url)
                     
+                    # 物件番号が取得できなかった場合はスキップ
+                    if not d['物件番号']:
+                        self.log(f"  ⚠️ 物件番号が取得できませんでした")
+                        continue
+                    
+                    # スキップチェック（HTMLから物件番号を取得した後）
+                    if skip_scraped and d['物件番号'] in self.scraped_ids:
+                        self.log(f"  ⏭️ スキップ: 物件番号 {d['物件番号']}（取得済み）")
+                        skipped_count += 1
+                        self.update_progress(idx, len(detail_urls))
+                        continue
+                    
                     # 画像を取得
-                    if d['物件番号']:
-                        img_urls = self.extract_images(soup, d['物件番号'])
-                        d['画像URL'] = ', '.join(img_urls) if img_urls else ''
-                        d['画像枚数'] = len(img_urls)
-                        
-                        # 取得済みリストに追加
-                        self.scraped_ids.add(d['物件番号'])
-                        new_count += 1
-                    else:
-                        d['画像URL'] = ''
-                        d['画像枚数'] = 0
+                    img_urls = self.extract_images(soup, d['物件番号'])
+                    d['画像URL'] = ', '.join(img_urls) if img_urls else ''
+                    d['画像枚数'] = len(img_urls)
+                    
+                    # 取得済みリストに追加
+                    self.scraped_ids.add(d['物件番号'])
+                    new_count += 1
                     
                     rows.append(d)
                     self.log(f"  ✓ 物件番号 {d['物件番号']} - 画像{d['画像枚数']}枚取得")
@@ -429,25 +425,51 @@ class ScraperGUI:
     
     # 以下、スクレイピング関連のメソッド
     
-    def fetch_list_page(self):
-        res = requests.get(LIST_URL, headers=HEADERS)
+    def fetch_list_page(self, page_num=1):
+        url = LIST_URL if page_num == 1 else f"{LIST_URL}?pageNum={page_num}"
+        res = requests.get(url, headers=HEADERS)
         return BeautifulSoup(res.text, 'html.parser')
     
-    def get_detail_urls(self, soup, max_items):
-        urls = []
-        scripts = soup.find_all('script', {'type':'application/ld+json'})
-        for script in scripts:
-            if 'ItemList' in script.text:
-                try:
-                    data = json.loads(script.text)
-                    for item in data.get('itemListElement', []):
-                        url = item.get('item')
-                        urls.append(url)
-                        if len(urls) >= max_items:
-                            break
-                except Exception:
-                    pass
-        return urls
+    def get_detail_urls(self, max_items):
+        """複数ページから物件URLを取得"""
+        all_urls = []
+        page_num = 1
+        
+        while len(all_urls) < max_items:
+            self.log(f"📝 一覧ページ {page_num} を取得中...")
+            soup = self.fetch_list_page(page_num)
+            
+            # 現在のページからURLを抽出
+            page_urls = []
+            scripts = soup.find_all('script', {'type':'application/ld+json'})
+            for script in scripts:
+                if 'ItemList' in script.text:
+                    try:
+                        data = json.loads(script.text)
+                        for item in data.get('itemListElement', []):
+                            url = item.get('item')
+                            if url and url not in all_urls:
+                                page_urls.append(url)
+                    except Exception:
+                        pass
+            
+            # ページにURLがなければ終了
+            if not page_urls:
+                self.log(f"  ✓ ページ {page_num} には物件がありませんでした（終了）")
+                break
+            
+            self.log(f"  ✓ ページ {page_num} から {len(page_urls)} 件取得")
+            all_urls.extend(page_urls)
+            
+            # 指定件数に達したら終了
+            if len(all_urls) >= max_items:
+                all_urls = all_urls[:max_items]
+                break
+            
+            page_num += 1
+            time.sleep(0.5)  # ページ間のアクセス間隔
+        
+        return all_urls
     
     def fetch_detail_page(self, url):
         detail_headers = HEADERS.copy()
